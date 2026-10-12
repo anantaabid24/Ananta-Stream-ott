@@ -1,0 +1,177 @@
+
+name: Build Ananta Ott APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Validate source files
+        run: |
+          test -f pubspec.yaml
+          test -f lib/main.dart
+          echo "Required source files found."
+
+      - name: Generate Android project
+        shell: bash
+        run: |
+          APP_DIR="$RUNNER_TEMP/ananta_ott"
+
+          flutter create \
+            --platforms=android \
+            --org com.anantaott \
+            "$APP_DIR"
+
+          mkdir -p "$APP_DIR/lib"
+
+          cp pubspec.yaml "$APP_DIR/pubspec.yaml"
+          cp lib/main.dart "$APP_DIR/lib/main.dart"
+
+          export APP_DIR
+
+          python3 - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          manifest = os.path.join(
+              os.environ["APP_DIR"],
+              "android",
+              "app",
+              "src",
+              "main",
+              "AndroidManifest.xml",
+          )
+
+          android = "{http://schemas.android.com/apk/res/android}"
+          ET.register_namespace("android",
+                                "http://schemas.android.com/apk/res/android")
+
+          tree = ET.parse(manifest)
+          root = tree.getroot()
+
+          def ensure_permission(name):
+              for element in root.findall("uses-permission"):
+                  if element.get(android + "name") == name:
+                      return
+              element = ET.Element("uses-permission")
+              element.set(android + "name", name)
+              root.insert(0, element)
+
+          ensure_permission("android.permission.INTERNET")
+
+          # Permit HTTP streams for compatibility with providers
+          # that only offer HTTP. HTTPS remains strongly preferred.
+          application = root.find("application")
+          if application is None:
+              raise RuntimeError("Android application element missing")
+
+          application.set(
+              android + "usesCleartextTraffic",
+              "true",
+          )
+          application.set(android + "label", "Ananta Ott")
+
+          # Make the application discoverable on Android TV launchers.
+          for activity in root.findall("application/activity"):
+              if activity.get(android + "name", "").endswith(
+                  "MainActivity"
+              ):
+                  for intent in activity.findall("intent-filter"):
+                      actions = [
+                          a.get(android + "name")
+                          for a in intent.findall("action")
+                      ]
+                      categories = [
+                          c.get(android + "name")
+                          for c in intent.findall("category")
+                      ]
+
+                      if (
+                          "android.intent.action.MAIN" in actions
+                          and "android.intent.category.LAUNCHER"
+                          in categories
+                          and "android.intent.category.LEANBACK_LAUNCHER"
+                          not in categories
+                      ):
+                          category = ET.SubElement(
+                              intent, "category"
+                          )
+                          category.set(
+                              android + "name",
+                              "android.intent.category.LEANBACK_LAUNCHER",
+                          )
+
+          tree.write(
+              manifest,
+              encoding="utf-8",
+              xml_declaration=True,
+          )
+
+          print("Android manifest configured successfully.")
+          PY
+
+          # Copy the launcher icon so flutter_launcher_icons can generate Android assets.
+          mkdir -p "$APP_DIR/assets/icon"
+          cp assets/icon/ananta_ott_icon.png "$APP_DIR/assets/icon/ananta_ott_icon.png"
+
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+
+      - name: Install Flutter dependencies and generate app icon
+        working-directory: ${{ runner.temp }}/ananta_ott
+        run: |
+          flutter pub get
+          dart run flutter_launcher_icons
+
+      - name: Check Dart formatting
+        working-directory: ${{ runner.temp }}/ananta_ott
+        run: dart format --output=none --set-exit-if-changed lib/main.dart
+        continue-on-error: true
+
+      - name: Analyze Flutter code
+        working-directory: ${{ runner.temp }}/ananta_ott
+        run: flutter analyze --no-pub
+        continue-on-error: true
+
+      - name: Build release APK
+        working-directory: ${{ runner.temp }}/ananta_ott
+        run: flutter build apk --release
+
+      - name: Verify APK
+        run: |
+          APK="$RUNNER_TEMP/ananta_ott/build/app/outputs/flutter-apk/app-release.apk"
+          test -s "$APK"
+          ls -lh "$APK"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ananta-ott-apk
+          path: ${{ runner.temp }}/ananta_ott/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
