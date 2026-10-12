@@ -1,0 +1,47 @@
+name: Flutter CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout the code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Install Flutter (latest stable)
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'          # Change this to your Flutter version
+          channel: 'stable'
+
+      # 3. Install dependencies
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      # 4. Run analysis (optional but recommended)
+      - name: Analyze code
+        run: flutter analyze
+
+      # 5. Run tests (optional)
+      - name: Run tests
+        run: flutter test
+
+      # 6. Build APK for normal devices
+      - name: Build APK
+        run: flutter build apk --release
+
+      # 7. Build App Bundle (AAB) for Google Play / TV devices
+      - name: Build App Bundle
+        run: flutter build appbundle --release
+
+      # Optional: Build for Android TV only
+      # - name: Build for Android TV
+      #   run: flutter build appbundle --target-platform android-arm64,android-arm
