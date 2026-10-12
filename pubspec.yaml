@@ -1,0 +1,33 @@
+
+name: ananta_ott
+description: Ananta Ott live TV streaming application.
+publish_to: "none"
+
+version: 1.6.0+7
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  video_player: ^2.10.0
+  http: ^1.4.0
+  shared_preferences: ^2.5.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_launcher_icons: ^0.14.4
+
+flutter:
+  uses-material-design: true
+
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/icon/ananta_ott_icon.png"
+  adaptive_icon_background: "#090914"
+  adaptive_icon_foreground: "assets/icon/ananta_ott_icon.png"
+  min_sdk_android: 21
