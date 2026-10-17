@@ -1,30 +1,26 @@
-
-name: Build Ananta Ott APK
+name: Build Ananta OTT APK
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+  push:
+    branches: [main]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
-    name: Build Android APK
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-
+    timeout-minutes: 45
     steps:
-      - name: Checkout repository
+      - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -32,146 +28,195 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Validate source files
+      - name: Verify Java and Flutter
         run: |
-          test -f pubspec.yaml
-          test -f lib/main.dart
-          echo "Required source files found."
+          java -version
+          flutter --version
 
-      - name: Generate Android project
-        shell: bash
+      - name: Generate Android project scaffolding
+        run: flutter create --platforms=android --org com.ananta --project-name ott build_app
+
+      - name: Configure native Android PiP Activity
         run: |
-          APP_DIR="$RUNNER_TEMP/ananta_ott"
-
-          flutter create \
-            --platforms=android \
-            --org com.anantaott \
-            "$APP_DIR"
-
-          mkdir -p "$APP_DIR/lib"
-
-          cp pubspec.yaml "$APP_DIR/pubspec.yaml"
-          cp lib/main.dart "$APP_DIR/lib/main.dart"
-
-          export APP_DIR
-
           python3 - <<'PY'
-          import os
-          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          import re
+          activity = Path('build_app/android/app/src/main/kotlin/com/ananta/ott/MainActivity.kt')
+          activity.parent.mkdir(parents=True, exist_ok=True)
+          activity.write_text(r'''package com.ananta.ott
 
-          manifest = os.path.join(
-              os.environ["APP_DIR"],
-              "android",
-              "app",
-              "src",
-              "main",
-              "AndroidManifest.xml",
+          import android.app.PictureInPictureParams
+          import android.os.Build
+          import android.util.Rational
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              private val channelName = "com.ananta.ott/pip"
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+                      .setMethodCallHandler { call, result ->
+                          when (call.method) {
+                              "enterPictureInPicture" -> {
+                                  enterPip()
+                                  result.success(true)
+                              }
+                              "isPictureInPicture" -> {
+                                  result.success(isInPictureInPictureMode)
+                              }
+                              else -> result.notImplemented()
+                          }
+                      }
+              }
+
+              override fun onUserLeaveHint() {
+                  super.onUserLeaveHint()
+                  // Android Home/background action: keep the live stream visible
+                  // in PiP instead of destroying/recreating the Flutter page.
+                  enterPip()
+              }
+
+              private fun enterPip() {
+                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || isFinishing) return
+                  val builder = PictureInPictureParams.Builder()
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                      builder.setAutoEnterEnabled(true)
+                      // setSeamlessSourceRectHint() is not an Android API.
+                      // Keep the standard PiP source rect API for Android 12+.
+                      builder.setSourceRectHint(
+                          android.graphics.Rect(0, 0, resources.displayMetrics.widthPixels,
+                              (resources.displayMetrics.widthPixels * 9L / 16L).toInt())
+                      )
+                  }
+                  builder.setAspectRatio(Rational(16, 9))
+                  enterPictureInPictureMode(builder.build())
+              }
+          }
+          ''')
+          PY
+      - name: Copy app source and configure Android TV icon and manifest
+        run: |
+          test -f lib/main.dart
+          test -f lib/update_checker.dart
+          cp lib/main.dart build_app/lib/main.dart
+          cp lib/update_checker.dart build_app/lib/update_checker.dart
+          cp pubspec.yaml build_app/pubspec.yaml
+          # Flutter's generated test imports package:ott and MyApp, which do not
+          # exist in this app. Remove that template test from the temporary build.
+          rm -rf build_app/test
+          # Guard a nullable EPG program in repository revisions that use this
+          # display expression. The current source may already have the fix.
+          python3 - <<'PYFIX'
+          from pathlib import Path
+          p = Path('build_app/lib/main.dart')
+          s = p.read_text()
+          s = s.replace(
+              'Text(_epgLabelForProgram(program),',
+              'if (program != null) Text(_epgLabelForProgram(program),'
           )
-
-          android = "{http://schemas.android.com/apk/res/android}"
-          ET.register_namespace("android",
-                                "http://schemas.android.com/apk/res/android")
-
+          p.write_text(s)
+          PYFIX
+          mkdir -p build_app/android/app/src/main/res/drawable-nodpi
+          cp assets/ananta_launcher_icon.png build_app/android/app/src/main/res/drawable-nodpi/ananta_launcher_icon.png
+          cp assets/ananta_tv_banner.png build_app/android/app/src/main/res/drawable-nodpi/ananta_tv_banner.png
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          manifest = Path('build_app/android/app/src/main/AndroidManifest.xml')
+          ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
+          ns = '{http://schemas.android.com/apk/res/android}'
           tree = ET.parse(manifest)
           root = tree.getroot()
-
-          def ensure_permission(name):
-              for element in root.findall("uses-permission"):
-                  if element.get(android + "name") == name:
-                      return
-              element = ET.Element("uses-permission")
-              element.set(android + "name", name)
-              root.insert(0, element)
-
-          ensure_permission("android.permission.INTERNET")
-
-          # Permit HTTP streams for compatibility with providers
-          # that only offer HTTP. HTTPS remains strongly preferred.
-          application = root.find("application")
-          if application is None:
-              raise RuntimeError("Android application element missing")
-
-          application.set(
-              android + "usesCleartextTraffic",
-              "true",
-          )
-          application.set(android + "label", "Ananta Ott")
-
-          # Make the application discoverable on Android TV launchers.
-          for activity in root.findall("application/activity"):
-              if activity.get(android + "name", "").endswith(
-                  "MainActivity"
-              ):
-                  for intent in activity.findall("intent-filter"):
-                      actions = [
-                          a.get(android + "name")
-                          for a in intent.findall("action")
-                      ]
-                      categories = [
-                          c.get(android + "name")
-                          for c in intent.findall("category")
-                      ]
-
-                      if (
-                          "android.intent.action.MAIN" in actions
-                          and "android.intent.category.LAUNCHER"
-                          in categories
-                          and "android.intent.category.LEANBACK_LAUNCHER"
-                          not in categories
-                      ):
-                          category = ET.SubElement(
-                              intent, "category"
-                          )
-                          category.set(
-                              android + "name",
-                              "android.intent.category.LEANBACK_LAUNCHER",
-                          )
-
-          tree.write(
-              manifest,
-              encoding="utf-8",
-              xml_declaration=True,
-          )
-
-          print("Android manifest configured successfully.")
+          def has_tag(tag, attr, value):
+              return any(el.tag == tag and el.get(ns + attr) == value for el in root)
+          if not has_tag('uses-permission', 'name', 'android.permission.INTERNET'):
+              el = ET.Element('uses-permission'); el.set(ns + 'name', 'android.permission.INTERNET'); root.insert(0, el)
+          if not has_tag('uses-feature', 'name', 'android.hardware.touchscreen'):
+              el = ET.Element('uses-feature'); el.set(ns + 'name', 'android.hardware.touchscreen'); el.set(ns + 'required', 'false'); root.insert(1, el)
+          app = root.find('application')
+          app.set(ns + 'label', 'Ananta OTT')
+          app.set(ns + 'icon', '@drawable/ananta_launcher_icon')
+          app.set(ns + 'banner', '@drawable/ananta_tv_banner')
+          app.set(ns + 'usesCleartextTraffic', 'true')
+          activities = list(app.findall('activity'))
+          launcher = None
+          for activity in activities:
+              for filt in activity.findall('intent-filter'):
+                  cats = [c.get(ns + 'name') for c in filt.findall('category')]
+                  if 'android.intent.category.LAUNCHER' in cats:
+                      launcher = activity
+                      break
+              if launcher is not None: break
+          if launcher is None and activities:
+              launcher = activities[0]
+          if launcher is not None:
+              # Keep the Flutter activity alive and enable Android 8+ PiP.
+              launcher.set(ns + 'supportsPictureInPicture', 'true')
+              if int(root.get('android:versionCode', '0') or 0) >= 0:
+                  launcher.set(ns + 'resizeableActivity', 'true')
+              has_leanback = any('android.intent.category.LEANBACK_LAUNCHER' in [c.get(ns + 'name') for c in f.findall('category')] for f in launcher.findall('intent-filter'))
+              if not has_leanback:
+                  filt = ET.SubElement(launcher, 'intent-filter')
+                  action = ET.SubElement(filt, 'action'); action.set(ns + 'name', 'android.intent.action.MAIN')
+                  category = ET.SubElement(filt, 'category'); category.set(ns + 'name', 'android.intent.category.LEANBACK_LAUNCHER')
+          tree.write(manifest, encoding='utf-8', xml_declaration=True)
           PY
 
-          # Copy the launcher icon so flutter_launcher_icons can generate Android assets.
-          mkdir -p "$APP_DIR/assets/icon"
-          cp assets/icon/ananta_ott_icon.png "$APP_DIR/assets/icon/ananta_ott_icon.png"
-
-          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
-
-      - name: Install Flutter dependencies and generate app icon
-        working-directory: ${{ runner.temp }}/ananta_ott
+      - name: Configure transparent launch window
         run: |
-          flutter pub get
-          dart run flutter_launcher_icons
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+          base = Path('build_app/android/app/src/main/res')
+          for path in base.glob('values*/styles.xml'):
+              text = path.read_text()
+              # Remove a forced white/black launch background; transparent launch is intentional.
+              text = re.sub(r'<item name=\"android:windowBackground\">.*?</item>', '<item name=\"android:windowBackground\">@android:color/transparent</item>', text, flags=re.S)
+              if 'LaunchTheme' in text and 'windowDisablePreview' not in text:
+                  text = text.replace('</style>', '        <item name=\"android:windowDisablePreview\">true</item>\n    </style>', 1)
+              path.write_text(text)
+          PYCODE
 
-      - name: Check Dart formatting
-        working-directory: ${{ runner.temp }}/ananta_ott
-        run: dart format --output=none --set-exit-if-changed lib/main.dart
+      - name: Resolve dependencies
+        working-directory: build_app
+        run: flutter pub get -v
+
+      - name: Analyze source (diagnostic only)
+        working-directory: build_app
         continue-on-error: true
-
-      - name: Analyze Flutter code
-        working-directory: ${{ runner.temp }}/ananta_ott
         run: flutter analyze --no-pub
-        continue-on-error: true
+
+      - name: Verify application version
+        working-directory: build_app
+        run: |
+          grep -q "version: 1.0.6+7" pubspec.yaml
 
       - name: Build release APK
-        working-directory: ${{ runner.temp }}/ananta_ott
-        run: flutter build apk --release
-
-      - name: Verify APK
-        run: |
-          APK="$RUNNER_TEMP/ananta_ott/build/app/outputs/flutter-apk/app-release.apk"
-          test -s "$APK"
-          ls -lh "$APK"
+        working-directory: build_app
+        run: flutter build apk --release --no-pub --verbose
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ananta-ott-apk
-          path: ${{ runner.temp }}/ananta_ott/build/app/outputs/flutter-apk/app-release.apk
+          name: ananta-ott-android-tv-apk
+          path: build_app/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish APK to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.6
+          name: Ananta OTT v1.0.6
+          body: |
+            ## Ananta OTT v1.0.6
+            - Android mobile Picture-in-Picture when minimizing/home
+            - Restores the same channel/player/UI state when returning
+            - Mobile player controls sit above the bottom channel information bar with a clear gap
+            - APK automatically attached to this GitHub Release
+          files: build_app/build/app/outputs/flutter-apk/app-release.apk
+          overwrite_files: true
+          make_latest: true
